@@ -41,7 +41,7 @@ Parameters:
     Description: Rows per upsert batch
   ScheduleExpression:
     Type: String
-    Default: rate(1 hour)
+    Default: cron(0 5 * * ? *)
     Description: How often to run the sync (EventBridge schedule)
 
 Resources:
