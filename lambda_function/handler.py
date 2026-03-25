@@ -34,7 +34,7 @@ SUPABASE_URL = os.environ.get("SUPABASE_URL", "").rstrip("/")
 SUPABASE_KEY = os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "")
 
 DBX_TABLE = os.environ.get("DBX_TABLE", "prod.gldprd.dim_app_transportistas")
-SUPABASE_TABLE = os.environ.get("SUPABASE_TABLE", "dim_transportistas")
+SUPABASE_TABLE = os.environ.get("SUPABASE_TABLE", "transportistas")
 WATERMARK_TABLE = "etl_watermarks"
 BATCH_SIZE = int(os.environ.get("BATCH_SIZE", "500"))
 
@@ -215,7 +215,7 @@ def run_sync() -> dict:
     now = sync_start.isoformat()
 
     # Validate Supabase tables
-    r = supabase_get(SUPABASE_TABLE, {"select": "transportista_id", "limit": "1"})
+    r = supabase_get(SUPABASE_TABLE, {"select": "codigo_transportista", "limit": "1"})
     if r.status_code != 200:
         raise RuntimeError(f"Cannot access '{SUPABASE_TABLE}': {r.status_code}")
     logger.info("Table '%s' accessible.", SUPABASE_TABLE)
