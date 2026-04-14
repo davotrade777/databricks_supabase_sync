@@ -16,10 +16,12 @@ Usage:
 """
 import os
 import sys
-import uuid
 from datetime import datetime, timezone
 
 import httpx
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "lambda_function"))
+from id_generator import generate_transportista_id
 
 # ---------------------------------------------------------------------------
 # ENV
@@ -201,7 +203,7 @@ def split_new_and_existing(
         }
 
         if codigo not in existing_codigos:
-            record["transportista_id"] = str(uuid.uuid4())
+            record["transportista_id"] = generate_transportista_id(codigo)
             record["estado_transportista"] = "pendiente"
             new_rows.append(record)
 

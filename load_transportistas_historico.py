@@ -13,10 +13,12 @@ Usage:
 """
 import os
 import sys
-import uuid
 from datetime import datetime, timezone
 
 import httpx
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "lambda_function"))
+from id_generator import generate_transportista_id
 
 # ---------------------------------------------------------------------------
 # ENV
@@ -171,7 +173,7 @@ def transform_rows(rows: list[tuple]) -> list[dict]:
             continue
 
         result.append({
-            "transportista_id": str(uuid.uuid4()),
+            "transportista_id": generate_transportista_id(codigo),
             "codigo_transportista": codigo,
             "ruc": ruc,
             "nombre_transportista": row[2],

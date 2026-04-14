@@ -10,13 +10,13 @@ without touching estado_transportista.
 import json
 import logging
 import os
-import uuid
 from datetime import datetime, timezone
 from typing import Any
 
 import httpx
 from databricks import sql
 from databricks.sdk.core import Config, oauth_service_principal
+from id_generator import generate_transportista_id
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
@@ -176,11 +176,20 @@ def deduplicate_rows(rows: list[tuple]) -> list[tuple]:
     return list(seen.values())
 
 
+def _clean_unique_field(value: Any) -> str | None:
+    """Return None for empty/whitespace-only strings (safe for UNIQUE constraints)."""
+    if value is None:
+        return None
+    s = str(value).strip()
+    return s if s else None
+
+
 def split_new_and_existing(
     rows: list[tuple], existing_codigos: set[str], now: str
-) -> tuple[list[dict], list[dict]]:
+) -> list[dict]:
     new_rows: list[dict] = []
-    update_rows: list[dict] = []
+    seen_emails: set[str] = set()
+    seen_phones: set[str] = set()
 
     for row in rows:
         codigo = str(row[0]).strip() if row[0] else None
@@ -188,19 +197,32 @@ def split_new_and_existing(
         if not codigo or not ruc:
             continue
 
+        email = _clean_unique_field(row[4])
+        telefono = _clean_unique_field(row[3])
+
+        if email and email in seen_emails:
+            email = None
+        if telefono and telefono in seen_phones:
+            telefono = None
+
+        if email:
+            seen_emails.add(email)
+        if telefono:
+            seen_phones.add(telefono)
+
         record = {
             "codigo_transportista": codigo,
             "ruc": ruc,
             "nombre_transportista": row[2],
-            "telefono": row[3],
-            "email": str(row[4]).strip() if row[4] else None,
+            "telefono": telefono,
+            "email": email,
             "placas": _serialize_array(row[6]),
             "tipos_vehiculo": _serialize_array(row[7]),
             "_ingested_at": now,
         }
 
         if codigo not in existing_codigos:
-            record["transportista_id"] = str(uuid.uuid4())
+            record["transportista_id"] = generate_transportista_id(codigo)
             record["estado_transportista"] = "pendiente"
             new_rows.append(record)
 

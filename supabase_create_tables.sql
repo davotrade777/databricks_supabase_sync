@@ -26,7 +26,7 @@ CREATE TYPE carrier_status_enum AS ENUM ('activo', 'inactivo', 'pendiente');
 CREATE TYPE carrier_roles_enum AS ENUM ('driver', 'manager');
 
 CREATE TABLE IF NOT EXISTS public.transportistas (
-    transportista_id        text PRIMARY KEY DEFAULT gen_random_uuid()::text,
+    transportista_id        uuid PRIMARY KEY,
     ruc                     text NOT NULL,
     codigo_transportista    text UNIQUE NOT NULL,
     nombre_transportista    text,
