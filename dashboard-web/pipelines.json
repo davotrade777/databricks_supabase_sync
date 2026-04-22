@@ -1,0 +1,42 @@
+{
+  "transportistas": {
+    "pipeline_name": "transportistas",
+    "source_table": "prod.gldlogistica.db_trade_dim_app_transportistas",
+    "target_table": "transportistas",
+    "write_mode": "insert_only",
+    "conflict_key": "codigo_transportista",
+    "batch_size": 500,
+    "schedule": "cron(0 5 * * ? *)",
+    "column_mapping": [
+      { "source": "codigo_transportista", "target": "codigo_transportista" },
+      { "source": "ruc", "target": "ruc" },
+      { "source": "nombre_transportista", "target": "nombre_transportista" },
+      { "source": "telefono", "target": "telefono" },
+      { "source": "email", "target": "email" }
+    ],
+    "defaults": {
+      "estado_transportista": "pendiente"
+    },
+    "id_strategy": {
+      "column": "transportista_id",
+      "type": "uuid5_codigo_transportista"
+    }
+  },
+  "transportistas_upsert_example": {
+    "pipeline_name": "transportistas_upsert_example",
+    "source_table": "prod.gldlogistica.db_trade_dim_app_transportistas",
+    "target_table": "transportistas",
+    "write_mode": "upsert",
+    "conflict_key": "codigo_transportista",
+    "batch_size": 500,
+    "schedule": "manual",
+    "column_mapping": [
+      { "source": "codigo_transportista", "target": "codigo_transportista" },
+      { "source": "ruc", "target": "ruc" },
+      { "source": "nombre_transportista", "target": "nombre_transportista" },
+      { "source": "telefono", "target": "telefono" },
+      { "source": "email", "target": "email" }
+    ],
+    "defaults": {}
+  }
+}

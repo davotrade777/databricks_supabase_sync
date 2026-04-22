@@ -8,7 +8,7 @@ Globals:
   Function:
     Timeout: 300
     MemorySize: 256
-    Runtime: python3.12
+    Runtime: nodejs20.x
 
 Parameters:
   DatabricksHost:
@@ -45,11 +45,21 @@ Parameters:
     Description: How often to run the sync (EventBridge schedule)
 
 Resources:
+  EtlLogsBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub patek-philippe-etl-logs-${AWS::AccountId}
+      LifecycleConfiguration:
+        Rules:
+          - Id: RetainLogs90Days
+            Status: Enabled
+            ExpirationInDays: 90
+
   SyncFunction:
     Type: AWS::Serverless::Function
     Properties:
       FunctionName: patek-philippe
-      Handler: handler.lambda_handler
+      Handler: handler.lambdaHandler
       CodeUri: lambda_function/
       Description: Incremental sync transportistas from Databricks PRD to Supabase
       Environment:
@@ -62,6 +72,9 @@ Resources:
           SUPABASE_SERVICE_ROLE_KEY: !Ref SupabaseServiceRoleKey
           DBX_TABLE: !Ref DbxTable
           BATCH_SIZE: !Ref BatchSize
+          ETL_LOGS_BUCKET: !Ref EtlLogsBucket
+          DEFAULT_PIPELINE: transportistas
+          PIPELINES_CONFIG_PATH: /var/task/pipelines.json
       Events:
         ScheduledSync:
           Type: Schedule
@@ -69,10 +82,13 @@ Resources:
             Schedule: !Ref ScheduleExpression
             Description: Scheduled Databricks PRD to Supabase incremental sync
             Enabled: true
+            Input: '{"pipeline_name":"transportistas"}'
       Policies:
         - AWSLambdaBasicExecutionRole
+        - S3CrudPolicy:
+            BucketName: !Ref EtlLogsBucket
     Metadata:
-      BuildMethod: python3.12
+      BuildMethod: nodejs20.x
 
   SyncLogGroup:
     Type: AWS::Logs::LogGroup
@@ -87,3 +103,6 @@ Outputs:
   SyncFunctionName:
     Description: Lambda function name
     Value: !Ref SyncFunction
+  EtlLogsBucketName:
+    Description: S3 bucket for ETL execution logs
+    Value: !Ref EtlLogsBucket
