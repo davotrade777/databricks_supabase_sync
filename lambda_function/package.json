@@ -1,0 +1,11 @@
+{
+  "name": "databricks-supabase-sync-lambda",
+  "version": "1.0.0",
+  "private": true,
+  "main": "handler.js",
+  "type": "commonjs",
+  "dependencies": {
+    "@aws-sdk/client-s3": "^3.922.0",
+    "uuid": "^11.1.0"
+  }
+}
