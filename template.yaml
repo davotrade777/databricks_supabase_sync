@@ -73,6 +73,8 @@ Resources:
           DBX_TABLE: !Ref DbxTable
           BATCH_SIZE: !Ref BatchSize
           ETL_LOGS_BUCKET: !Ref EtlLogsBucket
+          DEFAULT_PIPELINE: transportistas
+          PIPELINES_CONFIG_PATH: /var/task/pipelines.json
       Events:
         ScheduledSync:
           Type: Schedule
@@ -80,6 +82,7 @@ Resources:
             Schedule: !Ref ScheduleExpression
             Description: Scheduled Databricks PRD to Supabase incremental sync
             Enabled: true
+            Input: '{"pipeline_name":"transportistas"}'
       Policies:
         - AWSLambdaBasicExecutionRole
         - S3CrudPolicy:

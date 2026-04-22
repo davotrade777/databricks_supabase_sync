@@ -49,3 +49,24 @@ CREATE TABLE IF NOT EXISTS public.etl_watermarks (
     table_name      text PRIMARY KEY,
     last_timestamp  timestamp
 );
+
+-- ETL runs metadata (one row per pipeline execution)
+CREATE TABLE IF NOT EXISTS public.etl_runs (
+    run_id           bigint generated always as identity primary key,
+    pipeline_name    text NOT NULL,
+    status           text NOT NULL,
+    source_table     text,
+    target_table     text,
+    inserted_count   integer NOT NULL DEFAULT 0,
+    updated_count    integer NOT NULL DEFAULT 0,
+    skipped_count    integer NOT NULL DEFAULT 0,
+    error_message    text,
+    started_at       timestamptz NOT NULL DEFAULT now(),
+    finished_at      timestamptz NOT NULL DEFAULT now(),
+    duration_ms      integer,
+    s3_log_uri       text,
+    created_at       timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_etl_runs_pipeline_created_at
+  ON public.etl_runs (pipeline_name, created_at DESC);

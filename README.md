@@ -48,3 +48,22 @@ Se leen desde `transportistas_sync/.env`:
 - `SUPABASE_URL`
 - `SUPABASE_SERVICE_ROLE_KEY`
 - opcionales: `DBX_TABLE`, `SUPABASE_TABLE`, `FETCH_SIZE`, `LAMBDA_NAME`
+
+## Arquitectura Escalable (multi-pipeline)
+
+- Configuración por pipeline en `lambda_function/pipelines.json`.
+- La Lambda recibe `pipeline_name` y ejecuta la estrategia declarada:
+  - `insert_only`
+  - `upsert`
+- Watermark por pipeline en `etl_watermarks.table_name = pipeline_name`.
+- Auditoría por corrida:
+  - S3: `s3://.../{pipeline_name}/{yyyy-mm-dd}/{timestamp}.json`
+  - Supabase: tabla `etl_runs` (si existe).
+
+### Ejemplo de invocación
+
+```json
+{
+  "pipeline_name": "transportistas"
+}
+```

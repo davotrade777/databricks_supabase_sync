@@ -1,3 +1,5 @@
+const fs = require("fs");
+const path = require("path");
 const { S3Client, PutObjectCommand } = require("@aws-sdk/client-s3");
 const { v5: uuidv5 } = require("uuid");
 
@@ -9,13 +11,12 @@ const DATABRICKS_CLIENT_SECRET = process.env.DATABRICKS_CLIENT_SECRET || "";
 const SUPABASE_URL = (process.env.SUPABASE_URL || "").replace(/\/$/, "");
 const SUPABASE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY || "";
 
-const DBX_TABLE =
-  process.env.DBX_TABLE || "prod.gldlogistica.db_trade_dim_app_transportistas";
-const SUPABASE_TABLE = process.env.SUPABASE_TABLE || "transportistas";
 const WATERMARK_TABLE = "etl_watermarks";
 const BATCH_SIZE = parseInt(process.env.BATCH_SIZE || "500", 10);
 const ETL_LOGS_BUCKET = process.env.ETL_LOGS_BUCKET || "";
 const UUID_NAMESPACE = "b8f9e3a1-7c2d-4f5e-9a1b-3c4d5e6f7a8b";
+const PIPELINES_CONFIG_PATH =
+  process.env.PIPELINES_CONFIG_PATH || path.join(__dirname, "pipelines.json");
 
 const s3Client = new S3Client({});
 
@@ -39,6 +40,21 @@ function getSupabaseHeaders(preferHeader) {
 
 function generateTransportistaId(codigoTransportista) {
   return uuidv5(String(codigoTransportista).trim(), UUID_NAMESPACE);
+}
+
+function loadPipelinesConfig() {
+  const raw = fs.readFileSync(PIPELINES_CONFIG_PATH, "utf8");
+  return JSON.parse(raw);
+}
+
+function getPipelineConfig(event) {
+  const pipelineName = event?.pipeline_name || process.env.DEFAULT_PIPELINE || "transportistas";
+  const all = loadPipelinesConfig();
+  const cfg = all[pipelineName];
+  if (!cfg) {
+    throw new Error(`Unknown pipeline_name '${pipelineName}'`);
+  }
+  return cfg;
 }
 
 function cleanUniqueField(value) {
@@ -90,15 +106,11 @@ async function getDatabricksOAuthToken() {
   return data.access_token;
 }
 
-async function fetchDatabricks() {
-  const statement = `
-    SELECT
-      codigo_transportista, ruc, nombre_transportista,
-      telefono, email, estado_transportista
-    FROM ${DBX_TABLE}
-  `;
+async function fetchDatabricks(pipelineConfig) {
+  const sourceColumns = pipelineConfig.column_mapping.map((m) => m.source).join(", ");
+  const statement = `SELECT ${sourceColumns} FROM ${pipelineConfig.source_table}`;
 
-  logInfo(`Querying Databricks PRD`, { table: DBX_TABLE });
+  logInfo(`Querying Databricks PRD`, { table: pipelineConfig.source_table });
   const token = await getDatabricksOAuthToken();
   const res = await fetch(`https://${DATABRICKS_HOST}/api/2.0/sql/statements`, {
     method: "POST",
@@ -145,23 +157,27 @@ async function supabasePost(table, rows) {
   });
 }
 
-async function supabaseUpsert(table, rows) {
-  return fetch(`${SUPABASE_URL}/rest/v1/${table}`, {
+async function supabaseUpsert(table, rows, conflictKey = null) {
+  const url = new URL(`${SUPABASE_URL}/rest/v1/${table}`);
+  if (conflictKey) {
+    url.searchParams.set("on_conflict", conflictKey);
+  }
+  return fetch(url, {
     method: "POST",
     headers: getSupabaseHeaders("resolution=merge-duplicates"),
     body: JSON.stringify(rows),
   });
 }
 
-async function getExistingCodigos() {
+async function getExistingKeys(targetTable, conflictKey) {
   const codigos = new Set();
   let offset = 0;
   const batch = 1000;
 
   while (true) {
     const res = await supabaseGet(
-      SUPABASE_TABLE,
-      { select: "codigo_transportista" },
+      targetTable,
+      { select: conflictKey },
       { Range: `${offset}-${offset + batch - 1}` }
     );
 
@@ -171,7 +187,7 @@ async function getExistingCodigos() {
 
     const data = await res.json();
     if (!data.length) break;
-    for (const row of data) codigos.add(row.codigo_transportista);
+    for (const row of data) codigos.add(row[conflictKey]);
     if (data.length < batch) break;
     offset += batch;
   }
@@ -179,18 +195,29 @@ async function getExistingCodigos() {
   return codigos;
 }
 
-function splitNewAndExisting(rows, existingCodigos, now) {
+function splitRowsByMode(rows, pipelineConfig, existingKeys, now) {
   const newRows = [];
+  const allRows = [];
   const seenEmails = new Set();
   const seenPhones = new Set();
+  const sourceIndex = Object.fromEntries(
+    pipelineConfig.column_mapping.map((m, idx) => [m.source, idx])
+  );
+  const conflictKey = pipelineConfig.conflict_key;
 
   for (const row of rows) {
-    const codigo = row[0] ? String(row[0]).trim() : null;
-    const ruc = row[1] ? String(row[1]).trim() : null;
+    const codigo = row[sourceIndex.codigo_transportista]
+      ? String(row[sourceIndex.codigo_transportista]).trim()
+      : null;
+    const ruc = row[sourceIndex.ruc] ? String(row[sourceIndex.ruc]).trim() : null;
     if (!codigo || !ruc) continue;
 
-    let email = cleanUniqueField(row[4]);
-    let telefono = cleanUniqueField(row[3]);
+    let email =
+      sourceIndex.email !== undefined ? cleanUniqueField(row[sourceIndex.email]) : null;
+    let telefono =
+      sourceIndex.telefono !== undefined
+        ? cleanUniqueField(row[sourceIndex.telefono])
+        : null;
 
     if (email && seenEmails.has(email)) email = null;
     if (telefono && seenPhones.has(telefono)) telefono = null;
@@ -198,21 +225,29 @@ function splitNewAndExisting(rows, existingCodigos, now) {
     if (email) seenEmails.add(email);
     if (telefono) seenPhones.add(telefono);
 
-    if (!existingCodigos.has(codigo)) {
-      newRows.push({
-        transportista_id: generateTransportistaId(codigo),
-        codigo_transportista: codigo,
-        ruc,
-        nombre_transportista: row[2],
-        telefono,
-        email,
-        estado_transportista: "pendiente",
-        _ingested_at: now,
-      });
+    const record = {};
+    for (const mapping of pipelineConfig.column_mapping) {
+      const idx = sourceIndex[mapping.source];
+      let value = idx !== undefined ? row[idx] : null;
+      if (mapping.target === "email") value = email;
+      if (mapping.target === "telefono") value = telefono;
+      record[mapping.target] = value;
+    }
+    if (pipelineConfig.defaults) {
+      Object.assign(record, pipelineConfig.defaults);
+    }
+    if (pipelineConfig.id_strategy?.type === "uuid5_codigo_transportista") {
+      record[pipelineConfig.id_strategy.column] = generateTransportistaId(codigo);
+    }
+    record._ingested_at = now;
+
+    allRows.push(record);
+    if (!existingKeys.has(record[conflictKey])) {
+      newRows.push(record);
     }
   }
 
-  return newRows;
+  return { newRows, allRows };
 }
 
 async function saveEtlLog(logData) {
@@ -223,7 +258,8 @@ async function saveEtlLog(logData) {
 
   const ts = logData.sync_timestamp || new Date().toISOString();
   const datePrefix = ts.slice(0, 10);
-  const key = `transportistas/${datePrefix}/${ts.replace(/:/g, "-")}.json`;
+  const pipelineName = logData.pipeline_name || "unknown";
+  const key = `${pipelineName}/${datePrefix}/${ts.replace(/:/g, "-")}.json`;
 
   try {
     await s3Client.send(
@@ -244,15 +280,53 @@ async function saveEtlLog(logData) {
 }
 
 async function runSync() {
+  throw new Error("runSync(event) must be called with pipeline config");
+}
+
+async function createRunRecord(pipelineName, status, payload = {}) {
+  const row = {
+    pipeline_name: pipelineName,
+    status,
+    source_table: payload.source_table || null,
+    target_table: payload.dest_table || null,
+    inserted_count: payload.inserted || 0,
+    updated_count: payload.updated || 0,
+    skipped_count: payload.skipped || 0,
+    error_message: payload.error_message || null,
+    started_at: payload.started_at || new Date().toISOString(),
+    finished_at: payload.finished_at || new Date().toISOString(),
+    duration_ms: payload.duration_ms || null,
+    s3_log_uri: payload.s3_log_uri || null
+  };
+  try {
+    const res = await supabasePost("etl_runs", [row]);
+    if (![200, 201].includes(res.status)) {
+      const txt = await res.text();
+      console.warn(`etl_runs insert skipped (${res.status}): ${txt.slice(0, 200)}`);
+    }
+  } catch (err) {
+    console.warn(`etl_runs insert skipped: ${String(err.message || err)}`);
+  }
+}
+
+async function runSyncForPipeline(event) {
+  const startedAt = new Date();
+  const pipelineConfig = getPipelineConfig(event);
+  const pipelineName = pipelineConfig.pipeline_name;
   const syncStart = new Date();
   const now = syncStart.toISOString();
+  const sourceTable = pipelineConfig.source_table;
+  const targetTable = pipelineConfig.target_table;
+  const conflictKey = pipelineConfig.conflict_key;
+  const batchSize = pipelineConfig.batch_size || BATCH_SIZE;
+  const writeMode = pipelineConfig.write_mode || "insert_only";
 
-  const tableRes = await supabaseGet(SUPABASE_TABLE, {
-    select: "codigo_transportista",
+  const tableRes = await supabaseGet(targetTable, {
+    select: conflictKey,
     limit: "1",
   });
   if (tableRes.status !== 200) {
-    throw new Error(`Cannot access '${SUPABASE_TABLE}': ${tableRes.status}`);
+    throw new Error(`Cannot access '${targetTable}': ${tableRes.status}`);
   }
 
   const wmRes = await supabaseGet(WATERMARK_TABLE, {
@@ -263,67 +337,94 @@ async function runSync() {
     throw new Error(`Cannot access '${WATERMARK_TABLE}': ${wmRes.status}`);
   }
 
-  const existing = await getExistingCodigos();
+  const existing = await getExistingKeys(targetTable, conflictKey);
   const countBefore = existing.size;
-  logInfo(`Found ${countBefore} existing records in Supabase.`);
+  logInfo(`Found ${countBefore} existing records in Supabase.`, { targetTable, pipelineName });
 
-  let dbxRows = await fetchDatabricks();
+  let dbxRows = await fetchDatabricks(pipelineConfig);
   if (!dbxRows.length) {
-    return { status: "no_data", inserted: 0, total: countBefore };
+    return { status: "no_data", inserted: 0, total: countBefore, pipeline_name: pipelineName };
   }
   dbxRows = deduplicateRows(dbxRows);
 
-  const newRows = splitNewAndExisting(dbxRows, existing, now);
+  const { newRows, allRows } = splitRowsByMode(dbxRows, pipelineConfig, existing, now);
   logInfo("Sync split", {
+    pipeline: pipelineName,
     new: newRows.length,
     skipped: dbxRows.length - newRows.length,
   });
 
   let inserted = 0;
-  for (let i = 0; i < newRows.length; i += BATCH_SIZE) {
-    const batch = newRows.slice(i, i + BATCH_SIZE);
-    const res = await supabasePost(SUPABASE_TABLE, batch);
+  let updated = 0;
+  const rowsToWrite = writeMode === "upsert" ? allRows : newRows;
+  for (let i = 0; i < rowsToWrite.length; i += batchSize) {
+    const batch = rowsToWrite.slice(i, i + batchSize);
+    const res =
+      writeMode === "upsert"
+        ? await supabaseUpsert(targetTable, batch, conflictKey)
+        : await supabasePost(targetTable, batch);
     if (![200, 201].includes(res.status)) {
       const txt = await res.text();
       throw new Error(`Insert failed: ${res.status} ${txt.slice(0, 300)}`);
     }
-    inserted += batch.length;
-    logInfo(`Inserted batch ${Math.floor(i / BATCH_SIZE) + 1}`, { size: batch.length });
+    if (writeMode === "upsert") {
+      const insertedInBatch = batch.filter((r) => !existing.has(r[conflictKey])).length;
+      inserted += insertedInBatch;
+      updated += batch.length - insertedInBatch;
+    } else {
+      inserted += batch.length;
+    }
+    logInfo(`Written batch ${Math.floor(i / batchSize) + 1}`, {
+      mode: writeMode,
+      size: batch.length
+    });
   }
 
-  const postCodigos = await getExistingCodigos();
+  const postCodigos = await getExistingKeys(targetTable, conflictKey);
   const countAfter = postCodigos.size;
   const syncTime = new Date().toISOString();
 
   const upsertRes = await supabaseUpsert(WATERMARK_TABLE, [
-    { table_name: SUPABASE_TABLE, last_timestamp: syncTime },
+    { table_name: pipelineName, last_timestamp: syncTime },
   ]);
   if (![200, 201].includes(upsertRes.status)) {
     console.warn(`Watermark update failed: ${upsertRes.status}`);
   }
 
   const detail = {
+    pipeline_name: pipelineName,
     status: "success",
     inserted,
+    updated,
     total: countAfter,
-    source_table: DBX_TABLE,
-    dest_table: SUPABASE_TABLE,
+    source_table: sourceTable,
+    dest_table: targetTable,
+    write_mode: writeMode,
+    conflict_key: conflictKey,
     source_count: dbxRows.length,
     dest_count_before: countBefore,
     dest_count_after: countAfter,
-    skipped: dbxRows.length - newRows.length,
+    skipped: dbxRows.length - rowsToWrite.length,
     sync_timestamp: syncTime,
-    inserted_records: newRows.map((r) => ({
-      codigo_transportista: r.codigo_transportista,
-      ruc: r.ruc,
-      nombre_transportista: r.nombre_transportista,
+    inserted_records: newRows.slice(0, 200).map((r) => ({
+      [conflictKey]: r[conflictKey]
     })),
   };
-  await saveEtlLog(detail);
+  const s3LogUri = await saveEtlLog(detail);
+  const finishedAt = new Date();
+  await createRunRecord(pipelineName, "success", {
+    ...detail,
+    started_at: startedAt.toISOString(),
+    finished_at: finishedAt.toISOString(),
+    duration_ms: finishedAt.getTime() - startedAt.getTime(),
+    s3_log_uri: s3LogUri
+  });
 
   return {
+    pipeline_name: pipelineName,
     status: "success",
     inserted,
+    updated,
     total: countAfter,
     sync_timestamp: syncTime,
   };
@@ -332,7 +433,7 @@ async function runSync() {
 exports.lambdaHandler = async (event) => {
   logInfo("Event received", event);
   try {
-    const result = await runSync();
+    const result = await runSyncForPipeline(event || {});
     logInfo("Sync complete", result);
     return {
       statusCode: 200,
@@ -340,6 +441,14 @@ exports.lambdaHandler = async (event) => {
     };
   } catch (error) {
     console.error("Sync failed", error);
+    try {
+      const pipelineName = event?.pipeline_name || process.env.DEFAULT_PIPELINE || "transportistas";
+      await createRunRecord(pipelineName, "error", {
+        error_message: String(error.message || error)
+      });
+    } catch (inner) {
+      console.error("Failed writing etl_runs error row", inner);
+    }
     return {
       statusCode: 500,
       body: JSON.stringify({ status: "error", message: String(error.message || error) }),
