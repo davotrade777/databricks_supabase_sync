@@ -19,8 +19,58 @@ CREATE TABLE IF NOT EXISTS public.transportistas_final (
     _ingested_at            timestamp DEFAULT CURRENT_TIMESTAMP
 );
 
+-- Transportistas PRD (synced from Databricks PRD: prod.gldprd.dim_app_transportistas)
+-- Requires ENUM types created first.
+
+CREATE TYPE carrier_status_enum AS ENUM ('activo', 'inactivo', 'pendiente');
+CREATE TYPE carrier_roles_enum AS ENUM ('driver', 'manager');
+
+CREATE TABLE IF NOT EXISTS public.transportistas (
+    transportista_id        uuid PRIMARY KEY,
+    ruc                     text NOT NULL,
+    codigo_transportista    text UNIQUE NOT NULL,
+    nombre_transportista    text,
+    telefono                text,
+    email                   text,
+    estado_transportista    carrier_status_enum NOT NULL DEFAULT 'pendiente',
+    placas                  text[],
+    tipos_vehiculo          text[],
+    _ingested_at            timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP,
+
+    is_first_login          boolean NOT NULL DEFAULT true,
+    welcome_at              timestamptz,
+    birth_date              date,
+    role                    carrier_roles_enum NOT NULL DEFAULT 'driver',
+    last_login              timestamptz
+);
+
 -- ETL watermarks (tracks last sync timestamp per table)
 CREATE TABLE IF NOT EXISTS public.etl_watermarks (
     table_name      text PRIMARY KEY,
     last_timestamp  timestamp
 );
+
+-- ETL runs metadata (one row per pipeline execution)
+CREATE TABLE IF NOT EXISTS public.etl_runs (
+    run_id           bigint generated always as identity primary key,
+    pipeline_name    text NOT NULL,
+    status           text NOT NULL,
+    source_table     text,
+    target_table     text,
+    inserted_count   integer NOT NULL DEFAULT 0,
+    updated_count    integer NOT NULL DEFAULT 0,
+    skipped_count    integer NOT NULL DEFAULT 0,
+    error_message    text,
+    started_at       timestamptz NOT NULL DEFAULT now(),
+    finished_at      timestamptz NOT NULL DEFAULT now(),
+    duration_ms      integer,
+    s3_log_uri       text,
+    created_at       timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_etl_runs_pipeline_created_at
+  ON public.etl_runs (pipeline_name, created_at DESC);
+
+-- Pipeline 2: QAS qas.aplicaciones.dim_vehiculos → public.vehicles (secondary Supabase).
+-- The live `vehicles` table is app-defined; typical columns: id, license_plate, type, model,
+-- weight_average_capacity, weight_average_capacity_unit, fleet_owner_unique_code, is_route_based, synced_at.

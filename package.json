@@ -1,0 +1,19 @@
+{
+  "name": "databricks-supabase-sync",
+  "version": "2.0.0",
+  "private": true,
+  "type": "commonjs",
+  "scripts": {
+    "sync:incremental": "node src/scripts/syncIncremental.js",
+    "sync:historical": "node src/scripts/loadHistorical.js",
+    "dashboard": "node src/dashboard/server.js",
+    "test:connection": "node src/scripts/testConnection.js"
+  },
+  "dependencies": {
+    "@aws-sdk/client-cloudwatch-logs": "^3.922.0",
+    "@aws-sdk/client-lambda": "^3.922.0",
+    "dotenv": "^16.4.7",
+    "express": "^4.21.2",
+    "uuid": "^11.1.0"
+  }
+}

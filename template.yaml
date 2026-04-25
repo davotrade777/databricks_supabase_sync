@@ -1,25 +1,42 @@
 AWSTemplateFormatVersion: '2010-09-09'
 Transform: AWS::Serverless-2016-10-31
 Description: >
-  Databricks to Supabase sync — runs every hour via EventBridge.
+  Databricks PRD to Supabase incremental sync — runs on schedule via EventBridge.
+  Uses OAuth M2M (Service Principal) for Databricks authentication.
 
 Globals:
   Function:
     Timeout: 300
     MemorySize: 256
-    Runtime: python3.12
+    Runtime: nodejs20.x
 
 Parameters:
   DatabricksHost:
     Type: String
-    Description: Databricks SQL warehouse hostname
+    Description: Databricks PRD SQL warehouse hostname
   DatabricksHttpPath:
     Type: String
-    Description: Databricks SQL warehouse HTTP path
-  DatabricksToken:
+    Description: Databricks PRD SQL warehouse HTTP path
+  DatabricksClientId:
+    Type: String
+    Description: Service Principal Application (Client) ID
+  DatabricksClientSecret:
     Type: String
     NoEcho: true
-    Description: Databricks personal access token
+    Description: Service Principal OAuth secret
+  DatabricksQasHost:
+    Type: String
+    Default: ""
+    Description: QAS workspace host (optional; pipelines with databricks_profile=qas)
+  DatabricksQasHttpPath:
+    Type: String
+    Default: ""
+    Description: QAS SQL warehouse HTTP path
+  DatabricksQasToken:
+    Type: String
+    Default: ""
+    NoEcho: true
+    Description: QAS Personal Access Token (PAT)
   SupabaseUrl:
     Type: String
     Description: Supabase project URL (https://xxx.supabase.co)
@@ -27,43 +44,85 @@ Parameters:
     Type: String
     NoEcho: true
     Description: Supabase service_role API key
+  SupabaseSecondaryUrl:
+    Type: String
+    Default: ""
+    Description: Second Supabase project URL (optional; pipelines with supabase_profile=secondary)
+  SupabaseSecondaryServiceRoleKey:
+    Type: String
+    Default: ""
+    NoEcho: true
+    Description: Service role for second Supabase project (optional)
   DbxTable:
     Type: String
-    Default: qas.aplicaciones.transportistas_final
+    Default: prod.gldlogistica.db_trade_dim_app_transportistas
     Description: Databricks source table (catalog.schema.table)
+  BatchSize:
+    Type: String
+    Default: "500"
+    Description: Rows per upsert batch
   ScheduleExpression:
     Type: String
-    Default: rate(1 hour)
+    Default: cron(0 5 * * ? *)
     Description: How often to run the sync (EventBridge schedule)
 
 Resources:
+  EtlLogsBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub patek-philippe-etl-logs-${AWS::AccountId}
+      LifecycleConfiguration:
+        Rules:
+          - Id: RetainLogs90Days
+            Status: Enabled
+            ExpirationInDays: 90
+
   SyncFunction:
     Type: AWS::Serverless::Function
     Properties:
-      FunctionName: databricks-supabase-sync
-      Handler: handler.lambda_handler
+      FunctionName: patek-philippe
+      Handler: handler.lambdaHandler
       CodeUri: lambda_function/
-      Description: Syncs transportistas_final from Databricks to Supabase
+      Description: Incremental sync transportistas from Databricks PRD to Supabase
       Environment:
         Variables:
           DATABRICKS_HOST: !Ref DatabricksHost
           DATABRICKS_HTTP_PATH: !Ref DatabricksHttpPath
-          DATABRICKS_TOKEN: !Ref DatabricksToken
+          DATABRICKS_CLIENT_ID: !Ref DatabricksClientId
+          DATABRICKS_CLIENT_SECRET: !Ref DatabricksClientSecret
+          DATABRICKS_QAS_HOST: !Ref DatabricksQasHost
+          DATABRICKS_QAS_HTTP_PATH: !Ref DatabricksQasHttpPath
+          DATABRICKS_QAS_TOKEN: !Ref DatabricksQasToken
           SUPABASE_URL: !Ref SupabaseUrl
           SUPABASE_SERVICE_ROLE_KEY: !Ref SupabaseServiceRoleKey
+          SUPABASE_SECONDARY_URL: !Ref SupabaseSecondaryUrl
+          SUPABASE_SECONDARY_SERVICE_ROLE_KEY: !Ref SupabaseSecondaryServiceRoleKey
           DBX_TABLE: !Ref DbxTable
-          BATCH_SIZE: "500"
+          BATCH_SIZE: !Ref BatchSize
+          ETL_LOGS_BUCKET: !Ref EtlLogsBucket
+          DEFAULT_PIPELINE: transportistas
+          PIPELINES_CONFIG_PATH: /var/task/pipelines.json
       Events:
-        HourlySync:
+        ScheduledSync:
           Type: Schedule
           Properties:
             Schedule: !Ref ScheduleExpression
-            Description: Hourly Databricks to Supabase sync
+            Description: Scheduled Databricks PRD to Supabase incremental sync
             Enabled: true
+            Input: '{"pipeline_name":"transportistas"}'
+        ScheduledSecondarySync:
+          Type: Schedule
+          Properties:
+            Schedule: !Ref ScheduleExpression
+            Description: Scheduled Databricks QAS to secondary Supabase sync
+            Enabled: true
+            Input: '{"pipeline_name":"pipeline_secondary_upsert"}'
       Policies:
         - AWSLambdaBasicExecutionRole
+        - S3CrudPolicy:
+            BucketName: !Ref EtlLogsBucket
     Metadata:
-      BuildMethod: python3.12
+      BuildMethod: nodejs20.x
 
   SyncLogGroup:
     Type: AWS::Logs::LogGroup
@@ -78,3 +137,6 @@ Outputs:
   SyncFunctionName:
     Description: Lambda function name
     Value: !Ref SyncFunction
+  EtlLogsBucketName:
+    Description: S3 bucket for ETL execution logs
+    Value: !Ref EtlLogsBucket

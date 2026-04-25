@@ -1,119 +1,69 @@
-# Databricks Connector to Supabase
+# Databricks → Supabase Sync (Node.js)
 
-Syncs `transportistas_final` from Databricks SQL to Supabase via REST API.
-Can run locally or as an AWS Lambda on an hourly schedule.
+Repositorio refactorizado a Node.js para sincronizar transportistas desde Databricks hacia Supabase.
 
-## Project structure
+## Stack actual
 
-```
-├── connector.py                    # Diagnostic: read Databricks table
-├── full_sync_to_supabase.py        # Local sync script (Databricks → Supabase REST)
-├── test_supabase_connection.py     # Test Supabase connectivity
-├── transportistas_sync/
-│   ├── .env                        # Credentials (not committed)
-│   ├── .env.example                # Template
-│   └── databricks_connector.py     # DatabricksConnector class
-├── lambda_function/
-│   ├── handler.py                  # AWS Lambda handler
-│   └── requirements.txt            # Lambda dependencies
-├── template.yaml                   # SAM template (Lambda + EventBridge)
-├── samconfig.toml                  # SAM deploy config
-├── deploy.sh                       # Build & deploy script
-├── supabase_create_tables.sql      # SQL to create Supabase tables
-└── requirements.txt                # Local dev dependencies
-```
+- **Lambda AWS**: Node.js 20 (`lambda_function/handler.js`)
+- **Infra**: SAM (`template.yaml`)
+- **Scripts locales**: Node (`src/scripts`)
+- **Dashboard local**: Node/Express (`src/dashboard/server.js`)
 
-## Local setup
+## Flujo ETL
 
-### 1. Python environment
+1. Lee tabla origen `prod.gldlogistica.db_trade_dim_app_transportistas` desde Databricks (OAuth M2M).
+2. Deduplica por `codigo_transportista`.
+3. Inserta solo nuevos en Supabase `transportistas`.
+4. Ignora duplicados de PK de forma segura.
+5. Actualiza `etl_watermarks`.
+6. Guarda log estructurado JSON en S3 (`patek-philippe-etl-logs-052124708820`).
+
+## Comandos locales
 
 ```bash
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
+npm install
+npm run test:connection
+npm run sync:incremental
+npm run sync:historical
+npm run dashboard
 ```
 
-### 2. Credentials
+Dashboard local: `http://localhost:5050`
+
+## Deploy Lambda
 
 ```bash
-cp transportistas_sync/.env.example transportistas_sync/.env
+sam build
+sam deploy --no-confirm-changeset
 ```
 
-Edit `transportistas_sync/.env`:
+## Variables de entorno (archivo local)
 
-- **DATABRICKS_HOST** — SQL warehouse hostname (e.g. `dbc-xxx.cloud.databricks.com`)
-- **DATABRICKS_HTTP_PATH** — HTTP path (e.g. `/sql/1.0/warehouses/xxx`)
-- **DATABRICKS_TOKEN** — Personal access token
-- **SUPABASE_URL** — Project URL (e.g. `https://xxx.supabase.co`)
-- **SUPABASE_SERVICE_ROLE_KEY** — service_role key from Project Settings → API
+Se leen desde `transportistas_sync/.env`:
 
-### 3. Run locally
+- `DATABRICKS_PRD_HOST`
+- `DATABRICKS_PRD_HTTP_PATH`
+- `DATABRICKS_PRD_CLIENT_ID`
+- `DATABRICKS_PRD_CLIENT_SECRET`
+- `SUPABASE_URL`
+- `SUPABASE_SERVICE_ROLE_KEY`
+- opcionales: `DBX_TABLE`, `SUPABASE_TABLE`, `FETCH_SIZE`, `LAMBDA_NAME`
 
-```bash
-# Test Databricks connection
-python connector.py
+## Arquitectura Escalable (multi-pipeline)
 
-# Test Supabase connection
-python test_supabase_connection.py
+- Configuración por pipeline en `lambda_function/pipelines.json`.
+- La Lambda recibe `pipeline_name` y ejecuta la estrategia declarada:
+  - `insert_only`
+  - `upsert`
+- Watermark por pipeline en `etl_watermarks.table_name = pipeline_name`.
+- Auditoría por corrida:
+  - S3: `s3://.../{pipeline_name}/{yyyy-mm-dd}/{timestamp}.json`
+  - Supabase: tabla `etl_runs` (si existe).
 
-# Run sync
-python full_sync_to_supabase.py
+### Ejemplo de invocación
+
+```json
+{
+  "pipeline_name": "transportistas"
+}
 ```
-
-## AWS Lambda deployment (SAM)
-
-### Prerequisites
-
-- [AWS CLI](https://docs.aws.amazon.com/cli/latest/userguide/install-cliv2.html) configured (`aws configure`)
-- [SAM CLI](https://docs.aws.amazon.com/serverless-application-model/latest/developerguide/install-sam-cli.html) installed
-- Docker running (for `sam build --use-container`)
-
-### Deploy
-
-```bash
-# First time (interactive — sets parameters)
-./deploy.sh --guided
-
-# Subsequent deploys
-./deploy.sh
-```
-
-During guided deploy, you'll be prompted for:
-
-| Parameter | Value |
-|-----------|-------|
-| DatabricksHost | `dbc-xxx.cloud.databricks.com` |
-| DatabricksHttpPath | `/sql/1.0/warehouses/xxx` |
-| DatabricksToken | Your PAT (hidden) |
-| SupabaseUrl | `https://xxx.supabase.co` |
-| SupabaseServiceRoleKey | Your service_role key (hidden) |
-| DbxTable | `qas.aplicaciones.transportistas_final` |
-| ScheduleExpression | `rate(1 hour)` |
-
-### Monitor
-
-```bash
-# Tail logs
-sam logs -n databricks-supabase-sync --tail
-
-# Invoke manually
-aws lambda invoke --function-name databricks-supabase-sync /dev/stdout
-
-# Check last sync in Supabase
-# SELECT * FROM public.etl_watermarks;
-```
-
-### How it works
-
-1. **EventBridge** triggers the Lambda every hour
-2. Lambda connects to **Databricks SQL** and fetches the full `transportistas_final` table
-3. Lambda **upserts** all rows to **Supabase** via REST API (`ON CONFLICT codigo_transportista`)
-4. Each row gets `_ingested_at` stamped with the current UTC time
-5. `etl_watermarks.last_timestamp` is updated with the sync time
-6. Existing rows are updated, new rows are inserted, nothing is deleted
-
-### Costs
-
-- **Lambda**: ~16s per run × 24 runs/day × 256MB = well within free tier
-- **Databricks**: SQL warehouse compute time for a small SELECT
-- **Supabase**: REST API calls (free tier covers this easily)

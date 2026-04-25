@@ -5,22 +5,17 @@
 version = 0.1
 
 [default.deploy.parameters]
-stack_name = "databricks-supabase-sync"
+stack_name = "databricks-supabase-sync-prd"
 resolve_s3 = true
-s3_prefix = "databricks-supabase-sync"
+s3_prefix = "databricks-supabase-sync-prd"
 region = "us-east-1"
 capabilities = "CAPABILITY_IAM"
 confirm_changeset = true
 
-parameter_overrides = [
-    "DatabricksHost=dbc-a673d4ad-763e.cloud.databricks.com",
-    "DatabricksHttpPath=/sql/1.0/warehouses/d44b787d62200d63",
-    "DatabricksToken=CHANGE_ME",
-    "SupabaseUrl=https://cfihfczuvwbulxddbknd.supabase.co",
-    "SupabaseServiceRoleKey=CHANGE_ME",
-    "DbxTable=qas.aplicaciones.transportistas_final",
-    "ScheduleExpression=rate(1 hour)",
-]
+# Use non-sensitive defaults in git; keep real credentials in samconfig.local.toml (ignored)
+# Deploy with local creds: sam deploy --config-file samconfig.local.toml --no-confirm-changeset
+# ScheduleExpression must be quoted for SAM: ScheduleExpression="cron(...)" (see AWS SAM deploy docs)
+parameter_overrides = "DatabricksHost=CHANGEME DatabricksHttpPath=/sql/1.0/warehouses/CHANGEME DatabricksClientId=CHANGEME DatabricksClientSecret=CHANGEME DatabricksQasHost=CHANGEME DatabricksQasHttpPath=/sql/1.0/warehouses/CHANGEME DatabricksQasToken=CHANGEME SupabaseUrl=https://CHANGEME.supabase.co SupabaseServiceRoleKey=CHANGEME SupabaseSecondaryUrl=https://CHANGEME.supabase.co SupabaseSecondaryServiceRoleKey=CHANGEME DbxTable=prod.gldlogistica.db_trade_dim_app_transportistas BatchSize=500 ScheduleExpression=\"cron(0 5 * * ? *)\""
 
 [default.build.parameters]
 use_container = true
