@@ -11,6 +11,8 @@ type RunInfo = {
   finished_at?: string | null;
   duration_ms?: number | null;
   s3_log_uri?: string | null;
+  /** Where the row came from when etl_runs is missing (S3 checkpoint from Lambda). */
+  run_source?: "supabase" | "s3";
 };
 
 type PipelineRow = {
@@ -27,6 +29,7 @@ type PipelineRow = {
   datamart_watermark: string | null;
   source_audit_created_at_max: string | null;
   last_run: RunInfo | null;
+  pipeline_error?: string | null;
 };
 
 type DashboardPayload = {
@@ -38,6 +41,7 @@ type DashboardPayload = {
 export default function Home() {
   const [data, setData] = useState<DashboardPayload | null>(null);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState<string | null>(null);
   const [runningPipeline, setRunningPipeline] = useState<string | null>(null);
   const [runFeedback, setRunFeedback] = useState<
     Record<
@@ -50,10 +54,20 @@ export default function Home() {
   >({});
 
   const load = async () => {
-    const res = await fetch("/api/dashboard");
-    const json = await res.json();
-    setData(json);
-    setLoading(false);
+    try {
+      const res = await fetch("/api/dashboard");
+      const json = await res.json();
+      if (!res.ok) {
+        throw new Error(json?.error || "Failed to load dashboard");
+      }
+      setData(json);
+      setLoadError(null);
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : "Failed to load dashboard";
+      setLoadError(msg);
+    } finally {
+      setLoading(false);
+    }
   };
 
   const runPipeline = async (pipelineName: string) => {
@@ -107,6 +121,7 @@ export default function Home() {
 
         <section className="rounded-xl border border-zinc-700 bg-zinc-900 p-4 overflow-x-auto">
           {loading && <div className="text-zinc-400">Loading pipelines...</div>}
+          {!loading && loadError && <div className="text-red-300 text-sm">{loadError}</div>}
           {!loading && (
             <table className="w-full text-sm">
               <thead>
@@ -143,6 +158,11 @@ export default function Home() {
                       {p.source_audit_created_at_max ?? "—"}
                     </td>
                     <td className="py-3 pr-4">
+                      {p.pipeline_error && (
+                        <div className="mb-2 rounded bg-amber-900/30 px-2 py-1 text-[11px] text-amber-300">
+                          {p.pipeline_error}
+                        </div>
+                      )}
                       <div
                         className={`inline-block rounded px-2 py-1 text-xs ${
                           p.last_run?.status === "success"
@@ -156,6 +176,9 @@ export default function Home() {
                       </div>
                       <div className="mt-1 text-xs text-zinc-400">
                         ins {p.last_run?.inserted_count ?? 0} | upd {p.last_run?.updated_count ?? 0}
+                        {p.last_run?.run_source === "s3" && (
+                          <span className="ml-2 text-zinc-500"> (última corrida desde S3)</span>
+                        )}
                       </div>
                     </td>
                     <td className="py-3 pr-4">

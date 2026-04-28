@@ -45,6 +45,8 @@ Se leen desde `transportistas_sync/.env`:
 - `DATABRICKS_PRD_HTTP_PATH`
 - `DATABRICKS_PRD_CLIENT_ID`
 - `DATABRICKS_PRD_CLIENT_SECRET`
+
+En la Lambda (`handler.js`) también se aceptan los nombres que usa el template SAM: `DATABRICKS_HOST`, `DATABRICKS_HTTP_PATH`, `DATABRICKS_CLIENT_ID`, `DATABRICKS_CLIENT_SECRET` (misma semántica PRD).
 - `SUPABASE_URL`
 - `SUPABASE_SERVICE_ROLE_KEY`
 - opcionales: `DBX_TABLE`, `SUPABASE_TABLE`, `FETCH_SIZE`, `LAMBDA_NAME`
@@ -55,10 +57,14 @@ Se leen desde `transportistas_sync/.env`:
 - La Lambda recibe `pipeline_name` y ejecuta la estrategia declarada:
   - `insert_only`
   - `upsert`
-- Watermark por pipeline en `etl_watermarks.table_name = pipeline_name`.
-- Auditoría por corrida:
-  - S3: `s3://.../{pipeline_name}/{yyyy-mm-dd}/{timestamp}.json`
-  - Supabase: tabla `etl_runs` (si existe).
+- Watermark por pipeline en `etl_watermarks.table_name = pipeline_name` (opcional: ver `SKIP_ETL_WATERMARK`).
+- Auditoría por corrida (requiere `ETL_LOGS_BUCKET` en la Lambda, bucket ya definido en `template.yaml`):
+  - Log detallado: `s3://{bucket}/{pipeline_name}/{yyyy-mm-dd}/{timestamp}.json`
+  - **Checkpoint de última corrida OK:** `s3://{bucket}/{ETL_SUCCESS_PREFIX}/{pipeline_name}/latest.json` (se sobrescribe en cada éxito; incluye métricas y `full_log_uri` al log detallado)
+- Supabase: tabla `etl_runs` (si existe; se ignora si no está creada).
+- Variables: `SKIP_ETL_WATERMARK` (`true` / `1` = no lee ni escribe `etl_watermarks`); `ETL_SUCCESS_PREFIX` (prefijo del checkpoint, default `etl-success`).
+
+Para un registro operacional **sin** Supabase, basta con S3 + `SKIP_ETL_WATERMARK=true`. **DynamoDB** no está en el código: sería un `PutItem` tras el éxito y política IAM; S3 suele bastar para “última corrida OK” y trazabilidad.
 
 ### Ejemplo de invocación
 

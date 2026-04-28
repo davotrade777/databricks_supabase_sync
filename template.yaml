@@ -90,6 +90,11 @@ Resources:
           DATABRICKS_HTTP_PATH: !Ref DatabricksHttpPath
           DATABRICKS_CLIENT_ID: !Ref DatabricksClientId
           DATABRICKS_CLIENT_SECRET: !Ref DatabricksClientSecret
+          # Mismos valores con prefijo PRD — equivalente a transportistas_sync/.env
+          DATABRICKS_PRD_HOST: !Ref DatabricksHost
+          DATABRICKS_PRD_HTTP_PATH: !Ref DatabricksHttpPath
+          DATABRICKS_PRD_CLIENT_ID: !Ref DatabricksClientId
+          DATABRICKS_PRD_CLIENT_SECRET: !Ref DatabricksClientSecret
           DATABRICKS_QAS_HOST: !Ref DatabricksQasHost
           DATABRICKS_QAS_HTTP_PATH: !Ref DatabricksQasHttpPath
           DATABRICKS_QAS_TOKEN: !Ref DatabricksQasToken
@@ -100,6 +105,10 @@ Resources:
           DBX_TABLE: !Ref DbxTable
           BATCH_SIZE: !Ref BatchSize
           ETL_LOGS_BUCKET: !Ref EtlLogsBucket
+          # Set to "true" if the Supabase project has no etl_watermarks table (e.g. secondary only).
+          SKIP_ETL_WATERMARK: "false"
+          # S3 prefix for per-pipeline latest.json success checkpoints (same bucket as ETL_LOGS_BUCKET).
+          ETL_SUCCESS_PREFIX: etl-success
           DEFAULT_PIPELINE: transportistas
           PIPELINES_CONFIG_PATH: /var/task/pipelines.json
       Events:
@@ -116,7 +125,7 @@ Resources:
             Schedule: !Ref ScheduleExpression
             Description: Scheduled Databricks QAS to secondary Supabase sync
             Enabled: true
-            Input: '{"pipeline_name":"pipeline_secondary_upsert"}'
+            Input: '{"pipeline_name":"vehiculos"}'
       Policies:
         - AWSLambdaBasicExecutionRole
         - S3CrudPolicy:

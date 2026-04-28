@@ -14,6 +14,9 @@ function req(name: string): string {
 export const appConfig = {
   region: process.env.AWS_REGION || "us-east-1",
   lambdaName: process.env.LAMBDA_NAME || "patek-philippe",
+  /** Same bucket as Lambda ETL_LOGS_BUCKET; enables last-run from S3 if etl_runs is missing. */
+  etlLogsBucket: process.env.ETL_LOGS_BUCKET || "",
+  etlSuccessPrefix: (process.env.ETL_SUCCESS_PREFIX || "etl-success").replace(/\/$/, ""),
   supabaseUrl: req("SUPABASE_URL").replace(/\/$/, ""),
   supabaseKey: req("SUPABASE_SERVICE_ROLE_KEY"),
   /** Optional: second Supabase project for pipelines with supabase_profile=secondary */
@@ -28,4 +31,3 @@ export const appConfig = {
   databricksQasHttpPath: process.env.DATABRICKS_QAS_HTTP_PATH || "",
   databricksQasToken: process.env.DATABRICKS_QAS_TOKEN || "",
 };
-

@@ -3,10 +3,13 @@ const path = require("path");
 const { S3Client, PutObjectCommand } = require("@aws-sdk/client-s3");
 const { v5: uuidv5 } = require("uuid");
 
-const DATABRICKS_HOST = process.env.DATABRICKS_HOST || "";
-const DATABRICKS_HTTP_PATH = process.env.DATABRICKS_HTTP_PATH || "";
-const DATABRICKS_CLIENT_ID = process.env.DATABRICKS_CLIENT_ID || "";
-const DATABRICKS_CLIENT_SECRET = process.env.DATABRICKS_CLIENT_SECRET || "";
+const DATABRICKS_HOST = process.env.DATABRICKS_HOST || process.env.DATABRICKS_PRD_HOST || "";
+const DATABRICKS_HTTP_PATH =
+  process.env.DATABRICKS_HTTP_PATH || process.env.DATABRICKS_PRD_HTTP_PATH || "";
+const DATABRICKS_CLIENT_ID =
+  process.env.DATABRICKS_CLIENT_ID || process.env.DATABRICKS_PRD_CLIENT_ID || "";
+const DATABRICKS_CLIENT_SECRET =
+  process.env.DATABRICKS_CLIENT_SECRET || process.env.DATABRICKS_PRD_CLIENT_SECRET || "";
 const DATABRICKS_QAS_HOST = process.env.DATABRICKS_QAS_HOST || "";
 const DATABRICKS_QAS_HTTP_PATH = process.env.DATABRICKS_QAS_HTTP_PATH || "";
 const DATABRICKS_QAS_TOKEN = process.env.DATABRICKS_QAS_TOKEN || "";
@@ -19,6 +22,9 @@ const SUPABASE_SECONDARY_KEY = process.env.SUPABASE_SECONDARY_SERVICE_ROLE_KEY |
 const WATERMARK_TABLE = "etl_watermarks";
 const BATCH_SIZE = parseInt(process.env.BATCH_SIZE || "500", 10);
 const ETL_LOGS_BUCKET = process.env.ETL_LOGS_BUCKET || "";
+const SKIP_ETL_WATERMARK =
+  process.env.SKIP_ETL_WATERMARK === "1" || process.env.SKIP_ETL_WATERMARK === "true";
+const ETL_SUCCESS_PREFIX = (process.env.ETL_SUCCESS_PREFIX || "etl-success").replace(/\/$/, "");
 const UUID_NAMESPACE = "b8f9e3a1-7c2d-4f5e-9a1b-3c4d5e6f7a8b";
 const PIPELINES_CONFIG_PATH =
   process.env.PIPELINES_CONFIG_PATH || path.join(__dirname, "pipelines.json");
@@ -111,6 +117,18 @@ function cleanUniqueField(value) {
   return s || null;
 }
 
+function isBlankValue(value) {
+  return value === null || value === undefined || String(value).trim() === "";
+}
+
+function normalizeBoolean(value) {
+  if (value === null || value === undefined) return false;
+  if (typeof value === "boolean") return value;
+  if (typeof value === "number") return value !== 0;
+  const s = String(value).trim().toLowerCase();
+  return ["1", "true", "t", "yes", "y", "si", "s"].includes(s);
+}
+
 function sourceIndexMap(pipelineConfig) {
   return Object.fromEntries(
     pipelineConfig.column_mapping.map((m, i) => [m.source, i])
@@ -137,6 +155,39 @@ function deduplicateRows(rows, pipelineConfig) {
     console.warn(`Removed ${dupes} duplicate rows on conflict key from Databricks.`);
   }
   return [...seen.values()];
+}
+
+function buildSourceFieldStats(rows, pipelineConfig) {
+  const sourceIndex = sourceIndexMap(pipelineConfig);
+  const stats = {};
+  for (const mapping of pipelineConfig.column_mapping) {
+    stats[mapping.source] = { total: rows.length, null_or_empty: 0 };
+  }
+  for (const row of rows) {
+    for (const mapping of pipelineConfig.column_mapping) {
+      const i = sourceIndex[mapping.source];
+      const value = i !== undefined ? row[i] : undefined;
+      if (isBlankValue(value)) {
+        stats[mapping.source].null_or_empty += 1;
+      }
+    }
+  }
+  return stats;
+}
+
+function buildRecordFieldStats(records, fields) {
+  const stats = {};
+  for (const field of fields) {
+    stats[field] = { total: records.length, null_or_empty: 0 };
+  }
+  for (const row of records) {
+    for (const field of fields) {
+      if (isBlankValue(row[field])) {
+        stats[field].null_or_empty += 1;
+      }
+    }
+  }
+  return stats;
 }
 
 function splitRowsByMode(rows, pipelineConfig, existingKeys, now) {
@@ -176,6 +227,13 @@ function splitRowsGeneric(rows, pipelineConfig, existingKeys, now) {
     for (const mapping of pipelineConfig.column_mapping) {
       const i = sourceIndex[mapping.source];
       record[mapping.target] = i !== undefined ? row[i] : null;
+    }
+    if (Array.isArray(pipelineConfig.boolean_fields)) {
+      for (const field of pipelineConfig.boolean_fields) {
+        if (Object.prototype.hasOwnProperty.call(record, field)) {
+          record[field] = normalizeBoolean(record[field]);
+        }
+      }
     }
     if (pipelineConfig.defaults) {
       Object.assign(record, pipelineConfig.defaults);
@@ -279,7 +337,9 @@ function resolveDatabricksContext(pipelineConfig) {
     };
   }
   if (!DATABRICKS_HOST || !DATABRICKS_HTTP_PATH) {
-    throw new Error("Databricks PRD (DATABRICKS_HOST / DATABRICKS_HTTP_PATH) not configured");
+    throw new Error(
+      "Databricks PRD: set DATABRICKS_HOST + DATABRICKS_HTTP_PATH (SAM) or DATABRICKS_PRD_HOST + DATABRICKS_PRD_HTTP_PATH (transportistas_sync/.env)"
+    );
   }
   return { host: DATABRICKS_HOST, httpPath: DATABRICKS_HTTP_PATH, auth: "oauth" };
 }
@@ -407,6 +467,51 @@ async function saveEtlLog(logData) {
   }
 }
 
+/** Overwrites one JSON per pipeline — quick proof that last upsert succeeded. */
+async function saveLatestPipelineSuccess(logData, fullLogUri) {
+  if (!ETL_LOGS_BUCKET) {
+    return null;
+  }
+
+  const pipelineName = logData.pipeline_name || "unknown";
+  const key = `${ETL_SUCCESS_PREFIX}/${pipelineName}/latest.json`;
+  const payload = {
+    pipeline_name: logData.pipeline_name,
+    status: logData.status,
+    sync_timestamp: logData.sync_timestamp,
+    inserted: logData.inserted,
+    updated: logData.updated,
+    total: logData.total,
+    source_table: logData.source_table,
+    dest_table: logData.dest_table,
+    write_mode: logData.write_mode,
+    conflict_key: logData.conflict_key,
+    source_count: logData.source_count,
+    dest_count_before: logData.dest_count_before,
+    dest_count_after: logData.dest_count_after,
+    skipped: logData.skipped,
+    quality_stats: logData.quality_stats || null,
+    full_log_uri: fullLogUri || null,
+  };
+
+  try {
+    await s3Client.send(
+      new PutObjectCommand({
+        Bucket: ETL_LOGS_BUCKET,
+        Key: key,
+        Body: JSON.stringify(payload, null, 2),
+        ContentType: "application/json",
+      })
+    );
+    const uri = `s3://${ETL_LOGS_BUCKET}/${key}`;
+    logInfo("Latest success checkpoint saved", { uri });
+    return uri;
+  } catch (err) {
+    console.error("Failed to save latest pipeline checkpoint to S3", err);
+    return null;
+  }
+}
+
 async function createRunRecord(sb, pipelineName, status, payload = {}) {
   const row = {
     pipeline_name: pipelineName,
@@ -456,14 +561,16 @@ async function runSyncForPipeline(event) {
     throw new Error(`Cannot access '${targetTable}': ${tableRes.status}`);
   }
 
-  const wmRes = await sb.get(WATERMARK_TABLE, {
-    select: "table_name",
-    limit: "1",
-  });
-  if (wmRes.status !== 200) {
-    throw new Error(
-      `Cannot access '${WATERMARK_TABLE}': ${wmRes.status}. Create ETL tables in this Supabase project.`
-    );
+  if (!SKIP_ETL_WATERMARK) {
+    const wmRes = await sb.get(WATERMARK_TABLE, {
+      select: "table_name",
+      limit: "1",
+    });
+    if (wmRes.status !== 200) {
+      throw new Error(
+        `Cannot access '${WATERMARK_TABLE}': ${wmRes.status}. Create ETL tables in this Supabase project (or set SKIP_ETL_WATERMARK=true).`
+      );
+    }
   }
 
   const existing = await getExistingKeys(sb, targetTable, conflictKey);
@@ -486,6 +593,12 @@ async function runSyncForPipeline(event) {
   let inserted = 0;
   let updated = 0;
   const rowsToWrite = writeMode === "upsert" ? allRows : newRows;
+  const mappedTargets = pipelineConfig.column_mapping.map((m) => m.target);
+  const qualityStats = {
+    source_fields: buildSourceFieldStats(dbxRows, pipelineConfig),
+    rows_to_write_fields: buildRecordFieldStats(rowsToWrite, mappedTargets),
+    new_rows_fields: buildRecordFieldStats(newRows, mappedTargets),
+  };
   for (let i = 0; i < rowsToWrite.length; i += batchSize) {
     const batch = rowsToWrite.slice(i, i + batchSize);
     const res =
@@ -517,13 +630,15 @@ async function runSyncForPipeline(event) {
   const countAfter = postKeys.size;
   const syncTime = new Date().toISOString();
 
-  const upsertRes = await sb.upsert(
-    WATERMARK_TABLE,
-    [{ table_name: pipelineName, last_timestamp: syncTime }],
-    "table_name"
-  );
-  if (![200, 201].includes(upsertRes.status)) {
-    console.warn(`Watermark update failed: ${upsertRes.status}`);
+  if (!SKIP_ETL_WATERMARK) {
+    const upsertRes = await sb.upsert(
+      WATERMARK_TABLE,
+      [{ table_name: pipelineName, last_timestamp: syncTime }],
+      "table_name"
+    );
+    if (![200, 201].includes(upsertRes.status)) {
+      console.warn(`Watermark update failed: ${upsertRes.status}`);
+    }
   }
 
   const detail = {
@@ -540,12 +655,14 @@ async function runSyncForPipeline(event) {
     dest_count_before: countBefore,
     dest_count_after: countAfter,
     skipped: dbxRows.length - rowsToWrite.length,
+    quality_stats: qualityStats,
     sync_timestamp: syncTime,
     inserted_records: newRows
       .slice(0, 200)
       .map((r) => ({ [conflictKey]: r[conflictKey] })),
   };
   const s3LogUri = await saveEtlLog(detail);
+  const s3LatestUri = await saveLatestPipelineSuccess(detail, s3LogUri);
   const finishedAt = new Date();
   await createRunRecord(sb, pipelineName, "success", {
     ...detail,
@@ -562,6 +679,8 @@ async function runSyncForPipeline(event) {
     updated,
     total: countAfter,
     sync_timestamp: syncTime,
+    s3_log_uri: s3LogUri,
+    s3_latest_uri: s3LatestUri,
   };
 }
 
